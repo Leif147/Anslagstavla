@@ -43,6 +43,21 @@ body {
     color: var(--muted);
 }
 
+.storage-status {
+    margin: 0.5rem 0 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.storage-status.success {
+    color: var(--success);
+}
+
+.storage-status.warning {
+    color: var(--warning);
+}
+
 .panel {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -293,6 +308,14 @@ button.ghost:hover {
 .done-button {
     background: #89c6a8;
     color: #173927;
+}
+
+.delete-button {
+    background: #c53341;
+}
+
+.delete-button:hover {
+    background: #a82935;
 }
 
 @media (max-width: 700px) {

@@ -1,5 +1,15 @@
 const STORAGE_KEY = "digital-anslagstavla-posts-v1";
 
+// Configure window.APP_CONFIG before this script loads if you want custom settings.
+const APP_CONFIG = window.APP_CONFIG ?? {};
+const STORAGE_MODE = String(APP_CONFIG.storageMode ?? "gitrows").toLowerCase();
+const GITROWS_CONFIG = {
+    path: APP_CONFIG.gitrows?.path ?? "",
+    method: APP_CONFIG.gitrows?.method ?? "pull",
+    user: APP_CONFIG.gitrows?.user ?? "",
+    token: APP_CONFIG.gitrows?.token ?? ""
+};
+
 const postForm = document.getElementById("post-form");
 const formTitle = document.getElementById("form-title");
 const editingIdInput = document.getElementById("editing-id");
@@ -16,8 +26,10 @@ const filterCategoryInput = document.getElementById("filter-category");
 const filterPriorityInput = document.getElementById("filter-priority");
 const resetFiltersButton = document.getElementById("reset-filters");
 const filterStatus = document.getElementById("filter-status");
+const storageStatus = document.getElementById("storage-status");
 
-let posts = loadPosts();
+let posts = [];
+const storage = createStorageAdapter();
 
 postForm.addEventListener("submit", onSubmitPost);
 cancelEditButton.addEventListener("click", resetFormMode);
@@ -25,9 +37,24 @@ filterCategoryInput.addEventListener("change", renderPosts);
 filterPriorityInput.addEventListener("change", renderPosts);
 resetFiltersButton.addEventListener("click", resetFilters);
 
-renderPosts();
+init();
 
-function onSubmitPost(event) {
+async function init() {
+    setStorageStatus(storage.statusText, storage.statusLevel);
+
+    try {
+        posts = await storage.loadPosts();
+    } catch (error) {
+        console.error(error);
+        posts = [];
+        setStorageStatus("Lagring: Fel vid inläsning av data.", "warning");
+        window.alert("Kunde inte läsa in poster från valt lagringsläge.");
+    }
+
+    renderPosts();
+}
+
+async function onSubmitPost(event) {
     event.preventDefault();
 
     const title = titleInput.value.trim();
@@ -47,9 +74,10 @@ function onSubmitPost(event) {
     }
 
     const editingId = editingIdInput.value;
+    let nextPosts = [];
 
     if (editingId) {
-        posts = posts.map((post) => {
+        nextPosts = posts.map((post) => {
             if (post.id !== editingId) {
                 return post;
             }
@@ -65,7 +93,8 @@ function onSubmitPost(event) {
             };
         });
     } else {
-        posts.unshift({
+        nextPosts = [
+            {
             id: createId(),
             title,
             description,
@@ -78,10 +107,17 @@ function onSubmitPost(event) {
             completed: false,
             completedBy: "",
             completedAt: null
-        });
+            },
+            ...posts
+        ];
     }
 
-    savePosts();
+    const wasSaved = await persistPosts(nextPosts);
+
+    if (!wasSaved) {
+        return;
+    }
+
     renderPosts();
     postForm.reset();
     resetFormMode();
@@ -202,6 +238,15 @@ function renderPosts() {
 
         actions.append(editButton, completeButton);
 
+        if (post.completed) {
+            const deleteButton = document.createElement("button");
+            deleteButton.type = "button";
+            deleteButton.className = "delete-button";
+            deleteButton.textContent = "Ta bort";
+            deleteButton.addEventListener("click", () => deletePost(post.id));
+            actions.appendChild(deleteButton);
+        }
+
         card.append(topRow, description, tags, signatureList, actions);
         postList.appendChild(card);
     }
@@ -237,7 +282,7 @@ function resetFormMode() {
     cancelEditButton.classList.add("hidden");
 }
 
-function markPostAsComplete(postId) {
+async function markPostAsComplete(postId) {
     const initialsPrompt = window.prompt("Ange dina initialer för att bocka av posten:", "");
 
     if (initialsPrompt === null) {
@@ -251,7 +296,7 @@ function markPostAsComplete(postId) {
         return;
     }
 
-    posts = posts.map((post) => {
+    const nextPosts = posts.map((post) => {
         if (post.id !== postId) {
             return post;
         }
@@ -264,8 +309,59 @@ function markPostAsComplete(postId) {
         };
     });
 
-    savePosts();
+    const wasSaved = await persistPosts(nextPosts);
+
+    if (!wasSaved) {
+        return;
+    }
+
     renderPosts();
+}
+
+async function deletePost(postId) {
+    const post = posts.find((item) => item.id === postId);
+
+    if (!post) {
+        return;
+    }
+
+    if (!post.completed) {
+        window.alert("Du kan bara ta bort poster som är avbockade.");
+        return;
+    }
+
+    const shouldDelete = window.confirm(`Ta bort posten \"${post.title}\" permanent?`);
+
+    if (!shouldDelete) {
+        return;
+    }
+
+    const nextPosts = posts.filter((item) => item.id !== postId);
+    const wasSaved = await persistPosts(nextPosts);
+
+    if (!wasSaved) {
+        return;
+    }
+
+    if (editingIdInput.value === postId) {
+        postForm.reset();
+        resetFormMode();
+    }
+
+    renderPosts();
+}
+
+async function persistPosts(nextPosts) {
+    try {
+        await storage.savePosts(nextPosts);
+        posts = nextPosts;
+        return true;
+    } catch (error) {
+        console.error(error);
+        const message = error instanceof Error ? error.message : "Okänt fel.";
+        window.alert(`Kunde inte spara ändringen. ${message}`);
+        return false;
+    }
 }
 
 function updatePostCount(visiblePosts = posts) {
@@ -361,21 +457,103 @@ function formatTimestamp(timestamp) {
     });
 }
 
-function loadPosts() {
-    try {
-        const rawPosts = localStorage.getItem(STORAGE_KEY);
+function createStorageAdapter() {
+    if (STORAGE_MODE === "gitrows") {
+        const gitrowsStorage = createGitrowsStorage();
 
-        if (!rawPosts) {
-            return [];
+        if (gitrowsStorage) {
+            return gitrowsStorage;
         }
 
-        const parsedPosts = JSON.parse(rawPosts);
-        return Array.isArray(parsedPosts) ? parsedPosts : [];
-    } catch {
-        return [];
+        return createLocalStorageAdapter(
+            "Lagring: Lokalt (GitRows är inte korrekt konfigurerat).",
+            "warning"
+        );
     }
+
+    return createLocalStorageAdapter("Lagring: Lokalt i webbläsaren.", "neutral");
 }
 
-function savePosts() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(posts));
+function createGitrowsStorage() {
+    if (typeof window.Gitrows !== "function") {
+        console.warn("GitRows-biblioteket kunde inte laddas.");
+        return null;
+    }
+
+    if (!GITROWS_CONFIG.path) {
+        console.warn("GitRows path saknas. Ange APP_CONFIG.gitrows.path.");
+        return null;
+    }
+
+    const client = new window.Gitrows();
+    const options = {};
+
+    if (GITROWS_CONFIG.user) {
+        options.user = GITROWS_CONFIG.user;
+    }
+
+    if (GITROWS_CONFIG.token) {
+        options.token = GITROWS_CONFIG.token;
+    }
+
+    client.options(options);
+
+    return {
+        statusText: "Lagring: GitRows (synkat mot GitHub).",
+        statusLevel: "success",
+        async loadPosts() {
+            const data = await client.get(
+                GITROWS_CONFIG.path,
+                undefined,
+                GITROWS_CONFIG.method
+            );
+            return Array.isArray(data) ? data : [];
+        },
+        async savePosts(nextPosts) {
+            if (!GITROWS_CONFIG.user || !GITROWS_CONFIG.token) {
+                throw new Error(
+                    "GitRows kräver user och token för skrivning. Uppdatera APP_CONFIG.gitrows."
+                );
+            }
+
+            await client.replace(GITROWS_CONFIG.path, nextPosts);
+        }
+    };
+}
+
+function createLocalStorageAdapter(statusText, statusLevel) {
+    return {
+        statusText,
+        statusLevel,
+        async loadPosts() {
+            try {
+                const rawPosts = localStorage.getItem(STORAGE_KEY);
+
+                if (!rawPosts) {
+                    return [];
+                }
+
+                const parsedPosts = JSON.parse(rawPosts);
+                return Array.isArray(parsedPosts) ? parsedPosts : [];
+            } catch {
+                return [];
+            }
+        },
+        async savePosts(nextPosts) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPosts));
+        }
+    };
+}
+
+function setStorageStatus(text, level) {
+    if (!storageStatus) {
+        return;
+    }
+
+    storageStatus.textContent = text;
+    storageStatus.classList.remove("success", "warning");
+
+    if (level === "success" || level === "warning") {
+        storageStatus.classList.add(level);
+    }
 }

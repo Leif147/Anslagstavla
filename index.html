@@ -11,6 +11,7 @@
         <header class="app-header">
             <h1>Digital anslagstavla</h1>
             <p>Lägg till, redigera och bocka av poster med signering.</p>
+            <p id="storage-status" class="storage-status" aria-live="polite"></p>
         </header>
 
         <section class="panel form-panel" aria-labelledby="form-title">
@@ -92,7 +93,18 @@
             <div id="post-list" class="post-list" aria-live="polite"></div>
         </section>
     </main>
-
-    <script src="script.js"></script>
+<script>
+window.APP_CONFIG = {
+  storageMode: "gitrows",
+  gitrows: {
+    path: "@github/Leif147/Anslagstavla:main/data/posts.json",
+    method: "pull",
+    user: "Leif147",
+    token: "DIN_FINE_GRAINED_PAT"
+  }
+};
+</script>
+<script src="https://unpkg.com/gitrows@latest/dist/gitrows.min.js"></script>
+<script src="script.js"></script>
 </body>
 </html>
