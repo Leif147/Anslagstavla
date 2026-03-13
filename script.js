@@ -2,12 +2,9 @@ const STORAGE_KEY = "digital-anslagstavla-posts-v1";
 
 // Configure window.APP_CONFIG before this script loads if you want custom settings.
 const APP_CONFIG = window.APP_CONFIG ?? {};
-const STORAGE_MODE = String(APP_CONFIG.storageMode ?? "github-api").toLowerCase();
-const GITROWS_CONFIG = {
-    path: String(APP_CONFIG.gitrows?.path ?? "").trim(),
-    method: String(APP_CONFIG.gitrows?.method ?? "pull").trim().toLowerCase(),
-    user: String(APP_CONFIG.gitrows?.user ?? "").trim(),
-    token: normalizeToken(APP_CONFIG.gitrows?.token ?? "")
+const STORAGE_MODE = String(APP_CONFIG.storageMode ?? "backend-api").toLowerCase();
+const BACKEND_CONFIG = {
+    endpoint: String(APP_CONFIG.backendApi?.endpoint ?? APP_CONFIG.backend?.endpoint ?? "").trim()
 };
 
 const postForm = document.getElementById("post-form");
@@ -459,243 +456,63 @@ function formatTimestamp(timestamp) {
 }
 
 async function createStorageAdapter() {
-    if (STORAGE_MODE === "github-api" || STORAGE_MODE === "github" || STORAGE_MODE === "gitrows") {
-        const githubApiStorage = createGithubApiStorage();
+    const backendApiStorage = createBackendApiStorage();
 
-        if (githubApiStorage) {
-            return githubApiStorage;
-        }
+    if (backendApiStorage) {
+        return backendApiStorage;
     }
 
-    if (STORAGE_MODE === "gitrows") {
-        try {
-            const gitrowsStorage = await createGitrowsStorage();
-
-            if (gitrowsStorage) {
-                return gitrowsStorage;
-            }
-        } catch (error) {
-            console.warn("GitRows init misslyckades.", error);
-        }
-
-        return createLocalStorageAdapter(
-            "Lagring: Lokalt (varken GitRows eller GitHub API kunde initieras).",
-            "warning"
-        );
+    if (STORAGE_MODE !== "backend-api" && STORAGE_MODE !== "backend") {
+        console.warn(`Okänt storageMode \"${STORAGE_MODE}\". Faller tillbaka till lokal lagring.`);
     }
 
-    if (STORAGE_MODE === "github-api" || STORAGE_MODE === "github") {
-        return createLocalStorageAdapter(
-            "Lagring: Lokalt (GitHub API saknar konfiguration).",
-            "warning"
-        );
-    }
-
-    return createLocalStorageAdapter("Lagring: Lokalt i webbläsaren.", "neutral");
+    return createLocalStorageAdapter(
+        "Lagring: Lokalt (Backend API saknar konfiguration).",
+        "warning"
+    );
 }
 
-async function createGitrowsStorage() {
-    const GitrowsConstructor = await ensureGitrowsLibrary();
+function createBackendApiStorage() {
+    const endpoint = BACKEND_CONFIG.endpoint;
 
-    if (!GitrowsConstructor) {
-        console.warn("GitRows-biblioteket kunde inte laddas från CDN.");
+    if (!endpoint) {
         return null;
     }
-
-    if (!GITROWS_CONFIG.path) {
-        console.warn("GitRows path saknas. Ange APP_CONFIG.gitrows.path.");
-        return null;
-    }
-
-    const client = new GitrowsConstructor();
-    const options = {};
-
-    if (GITROWS_CONFIG.user) {
-        options.user = GITROWS_CONFIG.user;
-    }
-
-    if (GITROWS_CONFIG.token) {
-        options.token = GITROWS_CONFIG.token;
-    }
-
-    client.options(options);
 
     return {
-        statusText: "Lagring: GitRows (synkat mot GitHub).",
+        statusText: "Lagring: Backend API (säker skrivning utan PAT i frontend).",
         statusLevel: "success",
         async loadPosts() {
-            const data = await client.get(
-                GITROWS_CONFIG.path,
-                undefined,
-                GITROWS_CONFIG.method
-            );
-            return Array.isArray(data) ? data : [];
-        },
-        async savePosts(nextPosts) {
-            if (!GITROWS_CONFIG.user || !GITROWS_CONFIG.token) {
-                throw new Error(
-                    "GitRows kräver user och token för skrivning. Uppdatera APP_CONFIG.gitrows."
-                );
-            }
-
-            await client.replace(GITROWS_CONFIG.path, nextPosts);
-        }
-    };
-}
-
-function createGithubApiStorage() {
-    const parsedPath = parseGitrowsPath(GITROWS_CONFIG.path);
-
-    if (!parsedPath) {
-        console.warn("Kunde inte tolka path för GitHub API fallback.");
-        return null;
-    }
-
-    const hasWriteToken = hasValidGithubToken(GITROWS_CONFIG.token);
-
-    if (GITROWS_CONFIG.token && !hasWriteToken) {
-        console.warn("Token-formatet ser ogiltigt ut. GitHub API körs i läsläge tills giltig token anges.");
-    }
-
-    const { owner, repo, branch, filePath } = parsedPath;
-    const encodedPath = encodeRepoPath(filePath);
-    const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}`;
-    const baseHeaders = {
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-    };
-
-    if (hasWriteToken) {
-        baseHeaders.Authorization = `Bearer ${GITROWS_CONFIG.token}`;
-    }
-
-    return {
-        statusText: hasWriteToken
-            ? "Lagring: GitHub API (synkat mot GitHub)."
-            : "Lagring: GitHub API (endast läsning, giltig token saknas för skrivning).",
-        statusLevel: hasWriteToken ? "success" : "warning",
-        async loadPosts() {
-            const response = await fetch(`${fileUrl}?ref=${encodeURIComponent(branch)}`, {
-                headers: baseHeaders
+            const response = await fetch(endpoint, {
+                method: "GET",
+                headers: {
+                    Accept: "application/json"
+                }
             });
 
-            if (response.status === 404) {
-                return [];
-            }
-
             if (!response.ok) {
-                throw await createHttpError(
-                    response,
-                    "Kunde inte läsa data via GitHub API"
-                );
+                throw await createHttpError(response, "Kunde inte läsa data via Backend API");
             }
 
             const payload = await response.json();
-
-            if (!payload.content) {
-                return [];
-            }
-
-            const decoded = decodeBase64Utf8(payload.content);
-            const parsed = JSON.parse(decoded);
-            return Array.isArray(parsed) ? parsed : [];
+            const postsData = Array.isArray(payload) ? payload : payload?.posts;
+            return Array.isArray(postsData) ? postsData : [];
         },
         async savePosts(nextPosts) {
-            if (!hasWriteToken) {
-                throw new Error(
-                    "Giltig GitHub-token saknas för skrivning. Skapa en ny Fine-grained PAT med Contents: Read and write."
-                );
-            }
-
-            let currentSha = undefined;
-            const readResponse = await fetch(`${fileUrl}?ref=${encodeURIComponent(branch)}`, {
-                headers: baseHeaders
-            });
-
-            if (readResponse.ok) {
-                const existing = await readResponse.json();
-                currentSha = existing.sha;
-            } else if (readResponse.status !== 404) {
-                throw await createHttpError(
-                    readResponse,
-                    "Kunde inte verifiera befintlig data via GitHub API"
-                );
-            }
-
-            const body = {
-                message: `Update posts ${new Date().toISOString()}`,
-                content: encodeBase64Utf8(JSON.stringify(nextPosts, null, 2)),
-                branch
-            };
-
-            if (currentSha) {
-                body.sha = currentSha;
-            }
-
-            const writeResponse = await fetch(fileUrl, {
+            const response = await fetch(endpoint, {
                 method: "PUT",
                 headers: {
-                    ...baseHeaders,
+                    Accept: "application/json",
                     "Content-Type": "application/json"
                 },
-                body: JSON.stringify(body)
+                body: JSON.stringify({ posts: nextPosts })
             });
 
-            if (!writeResponse.ok) {
-                throw await createHttpError(
-                    writeResponse,
-                    "Kunde inte spara data via GitHub API"
-                );
+            if (!response.ok) {
+                throw await createHttpError(response, "Kunde inte spara data via Backend API");
             }
         }
     };
-}
-
-function parseGitrowsPath(path) {
-    if (!path || typeof path !== "string") {
-        return null;
-    }
-
-    const match = path
-        .trim()
-        .match(/^@?github\/([^\/]+)\/([^:\/]+)(?::([^\/]+))?\/(.+)$/i);
-
-    if (!match) {
-        return null;
-    }
-
-    return {
-        owner: match[1],
-        repo: match[2],
-        branch: match[3] || "main",
-        filePath: match[4].replace(/^\/+/, "")
-    };
-}
-
-function encodeRepoPath(path) {
-    return path
-        .split("/")
-        .filter(Boolean)
-        .map((segment) => encodeURIComponent(segment))
-        .join("/");
-}
-
-function encodeBase64Utf8(text) {
-    const bytes = new TextEncoder().encode(text);
-    let binary = "";
-
-    for (const byte of bytes) {
-        binary += String.fromCharCode(byte);
-    }
-
-    return btoa(binary);
-}
-
-function decodeBase64Utf8(base64) {
-    const normalized = String(base64).replace(/\s+/g, "");
-    const binary = atob(normalized);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
 }
 
 async function createHttpError(response, fallbackMessage) {
@@ -727,14 +544,6 @@ async function createHttpError(response, fallbackMessage) {
             ? `${fallbackMessage} [${response.status}] (${details})`
             : `${fallbackMessage} [${response.status}]`
     );
-}
-
-function normalizeToken(token) {
-    return String(token ?? "").trim();
-}
-
-function hasValidGithubToken(token) {
-    return /^(github_pat_|ghp_|gho_|ghu_|ghs_|ghr_)/.test(String(token ?? ""));
 }
 
 function createLocalStorageAdapter(statusText, statusLevel) {
@@ -772,65 +581,4 @@ function setStorageStatus(text, level) {
     if (level === "success" || level === "warning") {
         storageStatus.classList.add(level);
     }
-}
-
-async function ensureGitrowsLibrary() {
-    const existingConstructor = resolveGitrowsConstructor();
-
-    if (existingConstructor) {
-        return existingConstructor;
-    }
-
-    const sources = [
-        "https://cdn.jsdelivr.net/npm/gitrows@0.9.0/dist/gitrows.min.js",
-        "https://unpkg.com/gitrows@0.9.0/dist/gitrows.min.js"
-    ];
-
-    for (const source of sources) {
-        try {
-            await loadScript(source);
-
-            const loadedConstructor = resolveGitrowsConstructor();
-
-            if (loadedConstructor) {
-                return loadedConstructor;
-            }
-        } catch (error) {
-            console.warn(`Kunde inte ladda GitRows från ${source}.`, error);
-        }
-    }
-
-    return null;
-}
-
-function resolveGitrowsConstructor() {
-    if (typeof window.Gitrows === "function") {
-        return window.Gitrows;
-    }
-
-    if (typeof globalThis.Gitrows === "function") {
-        return globalThis.Gitrows;
-    }
-
-    if (typeof Gitrows === "function") {
-        return Gitrows;
-    }
-
-    return null;
-}
-
-function loadScript(source) {
-    return new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = source;
-        script.async = true;
-        script.addEventListener("load", () => resolve(), { once: true });
-        script.addEventListener(
-            "error",
-            () => reject(new Error(`Kunde inte ladda script: ${source}`)),
-            { once: true }
-        );
-
-        document.head.appendChild(script);
-    });
 }

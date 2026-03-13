@@ -95,17 +95,12 @@
     </main>
 <script>
 window.APP_CONFIG = {
-    storageMode: "github-api",
-  gitrows: {
-    path: "@github/Leif147/Anslagstavla:main/data/posts.json",
-    method: "pull",
-    user: "Leif147",
-    token: "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"
-  }
+    storageMode: "backend-api",
+    backendApi: {
+        endpoint: "https://<DIN-BACKEND-URL>/api/posts"
+        }
 };
 </script>
 <script src="script.js"></script>
 </body>
-
 </html>
-
