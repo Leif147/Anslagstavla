@@ -2,12 +2,12 @@ const STORAGE_KEY = "digital-anslagstavla-posts-v1";
 
 // Configure window.APP_CONFIG before this script loads if you want custom settings.
 const APP_CONFIG = window.APP_CONFIG ?? {};
-const STORAGE_MODE = String(APP_CONFIG.storageMode ?? "gitrows").toLowerCase();
+const STORAGE_MODE = String(APP_CONFIG.storageMode ?? "github-api").toLowerCase();
 const GITROWS_CONFIG = {
-    path: APP_CONFIG.gitrows?.path ?? "",
-    method: APP_CONFIG.gitrows?.method ?? "pull",
-    user: APP_CONFIG.gitrows?.user ?? "",
-    token: APP_CONFIG.gitrows?.token ?? ""
+    path: String(APP_CONFIG.gitrows?.path ?? "").trim(),
+    method: String(APP_CONFIG.gitrows?.method ?? "pull").trim().toLowerCase(),
+    user: String(APP_CONFIG.gitrows?.user ?? "").trim(),
+    token: normalizeToken(APP_CONFIG.gitrows?.token ?? "")
 };
 
 const postForm = document.getElementById("post-form");
@@ -459,6 +459,14 @@ function formatTimestamp(timestamp) {
 }
 
 async function createStorageAdapter() {
+    if (STORAGE_MODE === "github-api" || STORAGE_MODE === "github" || STORAGE_MODE === "gitrows") {
+        const githubApiStorage = createGithubApiStorage();
+
+        if (githubApiStorage) {
+            return githubApiStorage;
+        }
+    }
+
     if (STORAGE_MODE === "gitrows") {
         try {
             const gitrowsStorage = await createGitrowsStorage();
@@ -470,14 +478,15 @@ async function createStorageAdapter() {
             console.warn("GitRows init misslyckades.", error);
         }
 
-        const githubApiStorage = createGithubApiStorage();
-
-        if (githubApiStorage) {
-            return githubApiStorage;
-        }
-
         return createLocalStorageAdapter(
             "Lagring: Lokalt (varken GitRows eller GitHub API kunde initieras).",
+            "warning"
+        );
+    }
+
+    if (STORAGE_MODE === "github-api" || STORAGE_MODE === "github") {
+        return createLocalStorageAdapter(
+            "Lagring: Lokalt (GitHub API saknar konfiguration).",
             "warning"
         );
     }
@@ -542,20 +551,29 @@ function createGithubApiStorage() {
         return null;
     }
 
+    const hasWriteToken = hasValidGithubToken(GITROWS_CONFIG.token);
+
+    if (GITROWS_CONFIG.token && !hasWriteToken) {
+        console.warn("Token-formatet ser ogiltigt ut. GitHub API körs i läsläge tills giltig token anges.");
+    }
+
     const { owner, repo, branch, filePath } = parsedPath;
     const encodedPath = encodeRepoPath(filePath);
     const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}`;
     const baseHeaders = {
-        Accept: "application/vnd.github+json"
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
     };
 
-    if (GITROWS_CONFIG.token) {
+    if (hasWriteToken) {
         baseHeaders.Authorization = `Bearer ${GITROWS_CONFIG.token}`;
     }
 
     return {
-        statusText: "Lagring: GitHub API (fallback utan GitRows).",
-        statusLevel: "success",
+        statusText: hasWriteToken
+            ? "Lagring: GitHub API (synkat mot GitHub)."
+            : "Lagring: GitHub API (endast läsning, giltig token saknas för skrivning).",
+        statusLevel: hasWriteToken ? "success" : "warning",
         async loadPosts() {
             const response = await fetch(`${fileUrl}?ref=${encodeURIComponent(branch)}`, {
                 headers: baseHeaders
@@ -583,8 +601,10 @@ function createGithubApiStorage() {
             return Array.isArray(parsed) ? parsed : [];
         },
         async savePosts(nextPosts) {
-            if (!GITROWS_CONFIG.token) {
-                throw new Error("Token saknas för skrivning via GitHub API.");
+            if (!hasWriteToken) {
+                throw new Error(
+                    "Giltig GitHub-token saknas för skrivning. Skapa en ny Fine-grained PAT med Contents: Read and write."
+                );
             }
 
             let currentSha = undefined;
@@ -688,11 +708,33 @@ async function createHttpError(response, fallbackMessage) {
         details = "";
     }
 
+    if (response.status === 401) {
+        const reason = details || "Unauthorized";
+        return new Error(
+            `${fallbackMessage} [401] (${reason}). Token är ogiltig/återkallad eller felkopierad.`
+        );
+    }
+
+    if (response.status === 403) {
+        const reason = details || "Forbidden";
+        return new Error(
+            `${fallbackMessage} [403] (${reason}). Kontrollera token-behörighet: Contents = Read and write.`
+        );
+    }
+
     return new Error(
         details
             ? `${fallbackMessage} [${response.status}] (${details})`
             : `${fallbackMessage} [${response.status}]`
     );
+}
+
+function normalizeToken(token) {
+    return String(token ?? "").trim();
+}
+
+function hasValidGithubToken(token) {
+    return /^(github_pat_|ghp_|gho_|ghu_|ghs_|ghr_)/.test(String(token ?? ""));
 }
 
 function createLocalStorageAdapter(statusText, statusLevel) {
