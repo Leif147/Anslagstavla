@@ -29,7 +29,7 @@ const filterStatus = document.getElementById("filter-status");
 const storageStatus = document.getElementById("storage-status");
 
 let posts = [];
-const storage = createStorageAdapter();
+let storage = null;
 
 postForm.addEventListener("submit", onSubmitPost);
 cancelEditButton.addEventListener("click", resetFormMode);
@@ -40,6 +40,7 @@ resetFiltersButton.addEventListener("click", resetFilters);
 init();
 
 async function init() {
+    storage = await createStorageAdapter();
     setStorageStatus(storage.statusText, storage.statusLevel);
 
     try {
@@ -457,16 +458,26 @@ function formatTimestamp(timestamp) {
     });
 }
 
-function createStorageAdapter() {
+async function createStorageAdapter() {
     if (STORAGE_MODE === "gitrows") {
-        const gitrowsStorage = createGitrowsStorage();
+        try {
+            const gitrowsStorage = await createGitrowsStorage();
 
-        if (gitrowsStorage) {
-            return gitrowsStorage;
+            if (gitrowsStorage) {
+                return gitrowsStorage;
+            }
+        } catch (error) {
+            console.warn("GitRows init misslyckades.", error);
+        }
+
+        const githubApiStorage = createGithubApiStorage();
+
+        if (githubApiStorage) {
+            return githubApiStorage;
         }
 
         return createLocalStorageAdapter(
-            "Lagring: Lokalt (GitRows är inte korrekt konfigurerat).",
+            "Lagring: Lokalt (varken GitRows eller GitHub API kunde initieras).",
             "warning"
         );
     }
@@ -474,9 +485,11 @@ function createStorageAdapter() {
     return createLocalStorageAdapter("Lagring: Lokalt i webbläsaren.", "neutral");
 }
 
-function createGitrowsStorage() {
-    if (typeof window.Gitrows !== "function") {
-        console.warn("GitRows-biblioteket kunde inte laddas.");
+async function createGitrowsStorage() {
+    const GitrowsConstructor = await ensureGitrowsLibrary();
+
+    if (!GitrowsConstructor) {
+        console.warn("GitRows-biblioteket kunde inte laddas från CDN.");
         return null;
     }
 
@@ -485,7 +498,7 @@ function createGitrowsStorage() {
         return null;
     }
 
-    const client = new window.Gitrows();
+    const client = new GitrowsConstructor();
     const options = {};
 
     if (GITROWS_CONFIG.user) {
@@ -519,6 +532,167 @@ function createGitrowsStorage() {
             await client.replace(GITROWS_CONFIG.path, nextPosts);
         }
     };
+}
+
+function createGithubApiStorage() {
+    const parsedPath = parseGitrowsPath(GITROWS_CONFIG.path);
+
+    if (!parsedPath) {
+        console.warn("Kunde inte tolka path för GitHub API fallback.");
+        return null;
+    }
+
+    const { owner, repo, branch, filePath } = parsedPath;
+    const encodedPath = encodeRepoPath(filePath);
+    const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}`;
+    const baseHeaders = {
+        Accept: "application/vnd.github+json"
+    };
+
+    if (GITROWS_CONFIG.token) {
+        baseHeaders.Authorization = `Bearer ${GITROWS_CONFIG.token}`;
+    }
+
+    return {
+        statusText: "Lagring: GitHub API (fallback utan GitRows).",
+        statusLevel: "success",
+        async loadPosts() {
+            const response = await fetch(`${fileUrl}?ref=${encodeURIComponent(branch)}`, {
+                headers: baseHeaders
+            });
+
+            if (response.status === 404) {
+                return [];
+            }
+
+            if (!response.ok) {
+                throw await createHttpError(
+                    response,
+                    "Kunde inte läsa data via GitHub API"
+                );
+            }
+
+            const payload = await response.json();
+
+            if (!payload.content) {
+                return [];
+            }
+
+            const decoded = decodeBase64Utf8(payload.content);
+            const parsed = JSON.parse(decoded);
+            return Array.isArray(parsed) ? parsed : [];
+        },
+        async savePosts(nextPosts) {
+            if (!GITROWS_CONFIG.token) {
+                throw new Error("Token saknas för skrivning via GitHub API.");
+            }
+
+            let currentSha = undefined;
+            const readResponse = await fetch(`${fileUrl}?ref=${encodeURIComponent(branch)}`, {
+                headers: baseHeaders
+            });
+
+            if (readResponse.ok) {
+                const existing = await readResponse.json();
+                currentSha = existing.sha;
+            } else if (readResponse.status !== 404) {
+                throw await createHttpError(
+                    readResponse,
+                    "Kunde inte verifiera befintlig data via GitHub API"
+                );
+            }
+
+            const body = {
+                message: `Update posts ${new Date().toISOString()}`,
+                content: encodeBase64Utf8(JSON.stringify(nextPosts, null, 2)),
+                branch
+            };
+
+            if (currentSha) {
+                body.sha = currentSha;
+            }
+
+            const writeResponse = await fetch(fileUrl, {
+                method: "PUT",
+                headers: {
+                    ...baseHeaders,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (!writeResponse.ok) {
+                throw await createHttpError(
+                    writeResponse,
+                    "Kunde inte spara data via GitHub API"
+                );
+            }
+        }
+    };
+}
+
+function parseGitrowsPath(path) {
+    if (!path || typeof path !== "string") {
+        return null;
+    }
+
+    const match = path
+        .trim()
+        .match(/^@?github\/([^\/]+)\/([^:\/]+)(?::([^\/]+))?\/(.+)$/i);
+
+    if (!match) {
+        return null;
+    }
+
+    return {
+        owner: match[1],
+        repo: match[2],
+        branch: match[3] || "main",
+        filePath: match[4].replace(/^\/+/, "")
+    };
+}
+
+function encodeRepoPath(path) {
+    return path
+        .split("/")
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+}
+
+function encodeBase64Utf8(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = "";
+
+    for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+    }
+
+    return btoa(binary);
+}
+
+function decodeBase64Utf8(base64) {
+    const normalized = String(base64).replace(/\s+/g, "");
+    const binary = atob(normalized);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+}
+
+async function createHttpError(response, fallbackMessage) {
+    let details = "";
+
+    try {
+        const payload = await response.json();
+        details = payload?.message || "";
+    } catch {
+        details = "";
+    }
+
+    return new Error(
+        details
+            ? `${fallbackMessage} [${response.status}] (${details})`
+            : `${fallbackMessage} [${response.status}]`
+    );
 }
 
 function createLocalStorageAdapter(statusText, statusLevel) {
@@ -556,4 +730,65 @@ function setStorageStatus(text, level) {
     if (level === "success" || level === "warning") {
         storageStatus.classList.add(level);
     }
+}
+
+async function ensureGitrowsLibrary() {
+    const existingConstructor = resolveGitrowsConstructor();
+
+    if (existingConstructor) {
+        return existingConstructor;
+    }
+
+    const sources = [
+        "https://cdn.jsdelivr.net/npm/gitrows@0.9.0/dist/gitrows.min.js",
+        "https://unpkg.com/gitrows@0.9.0/dist/gitrows.min.js"
+    ];
+
+    for (const source of sources) {
+        try {
+            await loadScript(source);
+
+            const loadedConstructor = resolveGitrowsConstructor();
+
+            if (loadedConstructor) {
+                return loadedConstructor;
+            }
+        } catch (error) {
+            console.warn(`Kunde inte ladda GitRows från ${source}.`, error);
+        }
+    }
+
+    return null;
+}
+
+function resolveGitrowsConstructor() {
+    if (typeof window.Gitrows === "function") {
+        return window.Gitrows;
+    }
+
+    if (typeof globalThis.Gitrows === "function") {
+        return globalThis.Gitrows;
+    }
+
+    if (typeof Gitrows === "function") {
+        return Gitrows;
+    }
+
+    return null;
+}
+
+function loadScript(source) {
+    return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = source;
+        script.async = true;
+        script.addEventListener("load", () => resolve(), { once: true });
+        script.addEventListener(
+            "error",
+            () => reject(new Error(`Kunde inte ladda script: ${source}`)),
+            { once: true }
+        );
+
+        document.head.appendChild(script);
+    });
 }
